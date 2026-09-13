@@ -43,7 +43,8 @@ IAX2 判定语义说明：
 ### 3. 去重与推送
 
 - 去重键：`LinkedID + 技术/分机`，同一通呼叫在 `dedup_window`（默认 5 分钟）内只推一次
-- 多渠道扇出：Bark 与 yakphone 可同时启用，同一来电所有已配置渠道各推一次；单个渠道失败不影响其他渠道
+- 多渠道扇出：Bark 与 yakphone 可同时启用，同一来电按各渠道的**分机绑定**决定是否推送；单个渠道失败不影响其他渠道
+- 分机绑定：每个渠道可用 `extensions` 限定只推送哪些分机；未绑定的分机在日志中记录`渠道[xxx]未绑定分机 xxx，跳过`
 - Bark 网络错误/5xx 自动重试一次，4xx 等确定性错误不重试；yakphone 同策略
 
 ### 4. 推送渠道
@@ -52,6 +53,18 @@ IAX2 判定语义说明：
 |---|---|---|
 | Bark | 通知条（标题 + 正文） | `bark.device_key` 非空 |
 | yakphone | VoIP 来电唤醒（唤醒 App 弹出来电界面） | `yakphone.token` 非空 |
+
+#### 分机绑定（extensions）
+
+两个渠道各自独立配置，支持三种形态：
+
+| 需求 | 写法 |
+|---|---|
+| 全部（默认） | 留空 / 删除该行，或 `["*"]`，或 `["all"]` |
+| 一个 | `["210"]` |
+| 多个 | `["210", "220"]` |
+
+判定是**精确匹配**（`210` 不会命中 `2100`），与分机号所属技术无关（`PJSIP/210` 与 `IAX2/210` 都会命中绑定 `210` 的渠道）。因此可以让 Bark 推全部、yakphone 只推 210/220，实现"值班手机只接特定分机的 VoIP 唤醒"。
 
 Bark 推送内容：标题 `分机 210 有未接来电`，正文 `200 呼叫分机 210，但该分机当前未注册`。
 
@@ -75,7 +88,7 @@ yakphone 推送载荷（`POST {base_url}/v1/notify`）：
 cmd/sippush/        程序入口与装配
 internal/ami/       AMI 客户端：帧解析、断线重连、动作收发、PJSIP/IAX2 判活
 internal/monitor/   核心编排：DialBegin/VarSet 信号 → 判活 → 多渠道扇出（含去重）
-internal/notify/    推送渠道公共接口与消息结构
+internal/notify/    推送渠道公共接口、消息结构与分机绑定过滤器
 internal/bark/      Bark 推送渠道（POST {base_url}/push，JSON 载荷）
 internal/yakphone/  yakphone VoIP 来电唤醒渠道（POST {base_url}/v1/notify）
 internal/config/    YAML 配置加载、默认值与校验
@@ -130,6 +143,7 @@ go vet ./... && go test ./...
 | `base_url` | `https://api.day.app` | 官方实例；自建 Bark 改成你的地址 |
 | `device_key` | 空（禁用该渠道） | Bark App 首页复制的 URL 末尾那串 key |
 | `group` | `sip-push` | App 内通知分组名 |
+| `extensions` | 全部 | 本渠道绑定的分机号，见「分机绑定」 |
 | `push_timeout` | 8s | 单次推送超时 |
 
 #### yakphone —— VoIP 来电唤醒推送（可选）
@@ -139,6 +153,7 @@ go vet ./... && go test ./...
 | `base_url` | `https://push.yakteam.com` | yakphone 推送服务地址 |
 | `token` | 空（禁用该渠道） | yakphone 分配的设备令牌 |
 | `domain` | 必填（启用时） | 构造 `caller_uri` 的 SIP 域（PBX 的 SIP 域名或 IP） |
+| `extensions` | 全部 | 本渠道绑定的分机号，见「分机绑定」 |
 | `push_timeout` | 8s | 单次推送超时 |
 
 ## Asterisk / FreePBX 侧准备

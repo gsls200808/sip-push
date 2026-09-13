@@ -3,6 +3,7 @@ package yakphone
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -121,6 +122,37 @@ func TestPushCallerNameFallbacks(t *testing.T) {
 					got.CallerURI, got.CallerName, c.wantURI, c.wantCaller)
 			}
 		})
+	}
+}
+
+func TestPushSkippedWhenNotBound(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(Config{
+		BaseURL:     srv.URL,
+		Token:       "tok",
+		Domain:      "pbx.example.com",
+		PushTimeout: 2 * time.Second,
+		Extensions:  []string{"210"},
+	}, nopLogger{})
+
+	err := c.Push(context.Background(), notify.Info{Ext: "220", CallerNum: "1000"})
+	if !errors.Is(err, notify.ErrSkipped) {
+		t.Fatalf("期望 ErrSkipped，实际 %v", err)
+	}
+	if err := c.Push(context.Background(), notify.Info{Ext: "210", CallerNum: "1000"}); err != nil {
+		t.Fatalf("已绑定分机应推送成功: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("期望只发出 1 次 HTTP 请求，实际 %d", n)
+	}
+	if got := c.Bindings(); got != "210" {
+		t.Fatalf("Bindings() = %q", got)
 	}
 }
 

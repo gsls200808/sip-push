@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -110,6 +111,49 @@ type nopLogger struct{}
 
 func (nopLogger) Printf(string, ...interface{}) {}
 
+// recLogger 记录日志行，便于断言“跳过/失败”语义
+type recLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *recLogger) Printf(format string, v ...interface{}) {
+	l.mu.Lock()
+	l.lines = append(l.lines, fmt.Sprintf(format, v...))
+	l.mu.Unlock()
+}
+
+func (l *recLogger) has(substr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, s := range l.lines {
+		if strings.Contains(s, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *recLogger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.lines))
+	copy(out, l.lines)
+	return out
+}
+
+func waitLog(t *testing.T, l *recLogger, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if l.has(substr) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("等待日志 %q 超时，实际日志: %v", substr, l.snapshot())
+}
+
 // dialBegin 构造 Asterisk 12+（含 16）真实字段的 DialBegin：被叫 leg 用 DestChannel
 func dialBegin(dest, caller, linked string) ami.Frame {
 	return ami.Frame{
@@ -185,6 +229,38 @@ func waitPush(t *testing.T, ch chan pushMsg) notify.Info {
 	case <-time.After(2 * time.Second):
 		t.Fatal("等待推送超时")
 		return notify.Info{}
+	}
+}
+
+func TestChannelNotBoundIsSkipped(t *testing.T) {
+	q := &fakeQuerier{
+		statuses: map[string]*ami.PresenceStatus{"PJSIP/210": {Found: true, Online: false}},
+		queried:  make(chan queryCall, 8),
+	}
+	all := &fakePusher{name: "bark", got: make(chan pushMsg, 8)}
+	// yakphone 未绑定 210：以 ErrSkipped 模拟过滤器的行为
+	unbound := &fakePusher{name: "yakphone", got: make(chan pushMsg, 8), err: notify.ErrSkipped}
+	log := &recLogger{}
+	m, err := New(q, []notify.Pusher{all, unbound}, Config{
+		Technologies: []string{"PJSIP", "IAX2"},
+		ExtPattern:   `^[0-9*#]{2,8}$`,
+		DedupWindow:  time.Minute,
+	}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.OnEvent("DialBegin", dialBegin("PJSIP/210", "1000", "L1"))
+
+	// 绑定全部的渠道正常推送
+	_ = waitPush(t, all.got)
+	// 未绑定渠道记录“跳过”，且不记为推送成功
+	waitLog(t, log, "渠道[yakphone]未绑定分机 210，跳过")
+	if log.has("已推送离线来电提醒[yakphone]") {
+		t.Fatalf("未绑定渠道不应记录推送成功: %v", log.snapshot())
+	}
+	if l := len(unbound.snapshot()); l != 1 {
+		t.Fatalf("未绑定渠道仍应被调用一次（自行判定跳过），实际 %d", l)
 	}
 }
 

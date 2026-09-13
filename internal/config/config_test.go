@@ -69,6 +69,42 @@ func TestLoadRejectsMissingFields(t *testing.T) {
 	}
 }
 
+func TestLoadChannelExtensions(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "ext.yaml")
+	content := "ami:\n  addr: \"1.2.3.4:5038\"\n  username: u\n  secret: s\n" +
+		"bark:\n  device_key: k\n  extensions: [\"210\", \"220\"]\n" +
+		"yakphone:\n  token: tok\n  domain: d\n  extensions: [\"*\", \"\"]\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// bark 多分机绑定
+	if got := c.Bark.Extensions; len(got) != 2 || got[0] != "210" || got[1] != "220" {
+		t.Fatalf("bark.extensions 解析异常: %v", got)
+	}
+	// yakphone 原地保留，语义交给过滤器解释（"*" => 全部）
+	if got := c.Yakphone.Extensions; len(got) != 2 || got[0] != "*" {
+		t.Fatalf("yakphone.extensions 解析异常: %v", got)
+	}
+
+	// 未配置 extensions 时保持 nil（过滤器视为全部，兼容旧配置）
+	p2 := filepath.Join(dir, "noext.yaml")
+	if err := os.WriteFile(p2, []byte("ami:\n  addr: x\n  username: u\n  secret: s\nbark:\n  device_key: k\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := Load(p2)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c2.Bark.Extensions != nil || c2.Yakphone.Extensions != nil {
+		t.Fatalf("未配置 extensions 应为 nil，实际 %v / %v", c2.Bark.Extensions, c2.Yakphone.Extensions)
+	}
+}
+
 func TestLoadYakphoneChannel(t *testing.T) {
 	dir := t.TempDir()
 

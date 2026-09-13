@@ -3,6 +3,7 @@ package bark
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,38 @@ func TestPushSuccess(t *testing.T) {
 	}
 	if got.DeviceKey != "devkey123" || got.Title != "标题" || got.Body != "内容" || got.Group != "sip-push" {
 		t.Fatalf("载荷异常: %+v", got)
+	}
+}
+
+func TestPushSkippedWhenNotBound(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(Config{
+		BaseURL:     srv.URL,
+		DeviceKey:   "k",
+		PushTimeout: 2 * time.Second,
+		Extensions:  []string{"210"},
+	}, nopLogger{})
+
+	// 未绑定分机：返回 ErrSkipped 且不应发出 HTTP 请求
+	err := c.Push(context.Background(), notify.Info{Ext: "220", Title: "t", Body: "b"})
+	if !errors.Is(err, notify.ErrSkipped) {
+		t.Fatalf("期望 ErrSkipped，实际 %v", err)
+	}
+	// 绑定的分机正常推送
+	if err := c.Push(context.Background(), notify.Info{Ext: "210", Title: "t", Body: "b"}); err != nil {
+		t.Fatalf("已绑定分机应推送成功: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("期望只发出 1 次 HTTP 请求，实际 %d", n)
+	}
+	if got := c.Bindings(); got != "210" {
+		t.Fatalf("Bindings() = %q", got)
 	}
 }
 

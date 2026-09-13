@@ -35,6 +35,8 @@ type Config struct {
 	Domain string
 	// PushTimeout 单次推送超时
 	PushTimeout time.Duration
+	// Extensions 绑定的分机号；留空或 ["*"]/["all"] 表示全部
+	Extensions []string
 }
 
 // Logger 最小日志接口（*log.Logger 天然满足）
@@ -45,6 +47,7 @@ type Logger interface {
 // Client yakphone 推送客户端
 type Client struct {
 	cfg    Config
+	filter notify.ExtFilter
 	logger Logger
 	http   *http.Client
 }
@@ -53,10 +56,14 @@ type Client struct {
 func New(cfg Config, logger Logger) *Client {
 	return &Client{
 		cfg:    cfg,
+		filter: notify.NewExtFilter(cfg.Extensions),
 		logger: logger,
 		http:   &http.Client{Timeout: cfg.PushTimeout},
 	}
 }
+
+// Bindings 返回绑定分机的可读描述，用于启动日志
+func (c *Client) Bindings() string { return c.filter.String() }
 
 // Name 实现 notify.Pusher
 func (c *Client) Name() string { return "yakphone" }
@@ -71,6 +78,9 @@ type payload struct {
 // Push 实现 notify.Pusher：向 yakphone 推送 VoIP 来电唤醒。
 // 网络错误 / 5xx 重试一次，4xx 等确定性错误不重试。
 func (c *Client) Push(ctx context.Context, info notify.Info) error {
+	if !c.filter.Match(info.Ext) {
+		return notify.ErrSkipped
+	}
 	p := payload{
 		Token:      c.cfg.Token,
 		CallerURI:  buildCallerURI(info.CallerNum, c.cfg.Domain),

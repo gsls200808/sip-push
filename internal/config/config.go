@@ -67,6 +67,11 @@ type BarkConfig struct {
 	DeviceKey string `yaml:"device_key"`
 	// Group Bark 通知分组名，便于在 App 里归类
 	Group string `yaml:"group"`
+	// Extensions 本渠道绑定的分机号：
+	//   全部 -> 留空 或 ["*"] 或 ["all"]
+	//   一个 -> ["210"]
+	//   多个 -> ["210", "220"]
+	Extensions []string `yaml:"extensions"`
 	// PushTimeout 单次推送超时
 	PushTimeout Duration `yaml:"push_timeout"`
 }
@@ -81,6 +86,8 @@ type YakphoneConfig struct {
 	// Domain 构造 caller_uri 的 SIP 域（PBX 的 SIP 域名或 IP），
 	// yakphone App 以此匹配来电归属
 	Domain string `yaml:"domain"`
+	// Extensions 本渠道绑定的分机号，规则同 bark.extensions
+	Extensions []string `yaml:"extensions"`
 	// PushTimeout 单次推送超时
 	PushTimeout Duration `yaml:"push_timeout"`
 }

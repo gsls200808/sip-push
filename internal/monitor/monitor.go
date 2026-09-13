@@ -37,6 +37,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -495,11 +496,15 @@ func (m *Monitor) checkAndPush(tech, ext string, ci callerInfo) {
 		Body:       fmt.Sprintf("%s 呼叫分机 %s，但该分机当前未注册", ci.display, ext),
 	}
 	for _, p := range m.pushers {
-		if err := p.Push(ctx, info); err != nil {
+		err := p.Push(ctx, info)
+		switch {
+		case err == nil:
+			m.logger.Printf("已推送离线来电提醒[%s]: %s/%s caller=%s", p.Name(), tech, ext, ci.display)
+		case errors.Is(err, notify.ErrSkipped):
+			m.logger.Printf("渠道[%s]未绑定分机 %s，跳过", p.Name(), ext)
+		default:
 			m.logger.Printf("推送失败[%s] %s/%s caller=%s: %v", p.Name(), tech, ext, ci.display, err)
-			continue
 		}
-		m.logger.Printf("已推送离线来电提醒[%s]: %s/%s caller=%s", p.Name(), tech, ext, ci.display)
 	}
 }
 

@@ -26,7 +26,13 @@ call:
   # dest_prefix: "PJSIP/"
 
 # ---- 推送渠道 ----
-# bark 与 yakphone 至少配置一个，可同时启用（同一来电双渠道都会推送）
+# bark 与 yakphone 至少配置一个，可同时启用（同一来电按各自绑定关系推送）
+#
+# extensions：本渠道绑定的分机号，支持三种写法
+#   全部（默认，留空即全部）：  extensions: ["*"]     或 ["all"]  或整行删除
+#   一个：                     extensions: ["210"]
+#   多个：                     extensions: ["210", "220"]
+# 未绑定的分机在命中时会在日志中记录“渠道[xxx]未绑定分机 xxx，跳过”。
 
 bark:
   # 官方实例；自建 Bark 改成你的地址即可
@@ -34,6 +40,8 @@ bark:
   # Bark App 里复制的 device key（留空则禁用 bark 渠道）
   device_key: "YOUR_DEVICE_KEY"
   group: "sip-push"
+  # 全部 / 一个 / 多个，三种写法见上方说明
+  extensions: ["*"]
   push_timeout: "8s"
 
 # yakphone 软电话 VoIP 来电唤醒推送（唤醒 App 弹出来电界面）
@@ -43,6 +51,8 @@ yakphone:
   token: "YOUR_TOKEN"
   # 构造 caller_uri 的 SIP 域（PBX 的 SIP 域名或 IP），如 "192.168.11.21"
   domain: "pbx.example.com"
+  # 只给这两个分机推 yakphone VoIP 唤醒
+  extensions: ["210", "220"]
   push_timeout: "8s"
 
 # ---------------------------------------------------------------------------

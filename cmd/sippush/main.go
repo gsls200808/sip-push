@@ -32,23 +32,26 @@ func main() {
 	// 装配全部已配置的推送渠道（bark / yakphone，可同时启用）
 	var pushers []notify.Pusher
 	if cfg.Bark.DeviceKey != "" {
-		pushers = append(pushers, bark.New(bark.Config{
+		c := bark.New(bark.Config{
 			BaseURL:     cfg.Bark.BaseURL,
 			DeviceKey:   cfg.Bark.DeviceKey,
 			Group:       cfg.Bark.Group,
 			PushTimeout: cfg.Bark.PushTimeout.Std(),
-		}, logger))
+			Extensions:  cfg.Bark.Extensions,
+		}, logger)
+		pushers = append(pushers, c)
+		logger.Printf("推送渠道已启用: %s（绑定分机: %s）", c.Name(), c.Bindings())
 	}
 	if cfg.Yakphone.Token != "" {
-		pushers = append(pushers, yakphone.New(yakphone.Config{
+		c := yakphone.New(yakphone.Config{
 			BaseURL:     cfg.Yakphone.BaseURL,
 			Token:       cfg.Yakphone.Token,
 			Domain:      cfg.Yakphone.Domain,
 			PushTimeout: cfg.Yakphone.PushTimeout.Std(),
-		}, logger))
-	}
-	for _, p := range pushers {
-		logger.Printf("推送渠道已启用: %s", p.Name())
+			Extensions:  cfg.Yakphone.Extensions,
+		}, logger)
+		pushers = append(pushers, c)
+		logger.Printf("推送渠道已启用: %s（绑定分机: %s）", c.Name(), c.Bindings())
 	}
 
 	// monitor 需要在创建 ami.Client 时就作为事件回调，先建 monitor 再建 client
