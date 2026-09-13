@@ -1,13 +1,26 @@
 # sip-push
 
-基于 RFC 8599 思路的未注册分机来电推送服务：主叫呼叫 Asterisk 上的分机时，如果被叫分机当前**未注册/离线**（话机根本不会振铃），立即向被叫的 iPhone 通过 [Bark](https://apps.apple.com/app/bark-customed-pushNotifications/id1403753865) 推送一条"未接来电"提醒。
+基于 RFC 8599 思路的**未注册分机来电推送**服务：主叫呼叫 Asterisk / FreePBX 上的分机时，如果被叫分机当前**未注册/离线**（话机根本不会振铃），立即向被叫手机推送一条"未接来电"提醒。
+
+支持两类推送渠道，可同时启用并按分机分别绑定：
+
+- **[Bark](https://apps.apple.com/app/bark-customed-pushNotifications/id1403753865)**：通知条提醒
+- **yakphone**：VoIP 来电唤醒（唤起 App 弹出来电界面，而非仅一条通知）
+
+覆盖 **PJSIP** 与 **IAX2**（chan_iax2）两类分机，并同时支持**直呼分机**与**响铃组/寻线组**两种呼叫形态。
 
 程序作为旁路服务运行，通过 AMI 只读地观察呼叫事件，**不改动任何呼叫路由**。
 
 ## 工作原理
 
 ```
-主叫 200 ──拨 210──> Asterisk/FreePBX ──AMI 事件──> sip-push ──离线?──> Bark 推送到被叫手机
+主叫 200 ──拨 210 / 响铃组──> Asterisk / FreePBX ──AMI 事件──> sip-push
+                                                                  │
+                                                    按技术判活：分机在线？
+                                                                  │ 离线
+                                       ┌──────────────────────────┴──────────────────────────┐
+                                       ▼                                                     ▼
+                        Bark 通知条（仅绑定的分机）                    yakphone VoIP 唤醒（仅绑定的分机）
 ```
 
 ### 1. 呼叫信号（三类，互为补充）
@@ -218,12 +231,15 @@ journalctl -u sippush -n 20
 ```
 捕获离线呼叫信号(CHANUNAVAIL): PJSIP/210 caller=200 linked=1789270656.101
 同一通呼叫已推送过，忽略: PJSIP/210 linked=1789270656.101   ← FreePBX 二次置值，去重正常
-已推送离线来电提醒: PJSIP/210 caller=200
+已推送离线来电提醒[bark]: PJSIP/210 caller=200
+渠道[yakphone]未绑定分机 210，跳过                            ← 该渠道未绑定此分机
 ```
 
-4. iPhone 应收到 Bark 通知
+4. 手机应收到通知：绑定该分机的 Bark 渠道收到通知条，绑定的 yakphone 渠道唤起来电界面
 
-响铃组验证：向响铃组号码发起呼叫（真实外线呼入或 `asterisk -rx "channel originate Local/<组号>@from-internal/n application Wait 30"`），组内每个离线分机应各收到一条推送；组内不存在的分机号（两种技术都查不到）会记日志"不存在，跳过推送"。
+> 若日志只出现"未绑定分机，跳过"、没有"已推送"，说明该分机没被任何渠道绑定——检查 `bark.extensions` / `yakphone.extensions`。
+
+响铃组验证：向响铃组号码发起呼叫（真实外线呼入或 `asterisk -rx "channel originate Local/<组号>@from-internal/n application Wait 30"`），组内每个离线**且已被绑定**的分机应各收到一条推送；组内不存在的分机号（两种技术都查不到）会记日志"不存在，跳过推送"。
 
 已验证环境：FreePBX（Sangoma Linux 7）/ Asterisk 16.30 / chan_iax2，直呼 PJSIP/IAX2 分机与响铃组（ringall）链路均实测通过。
 
@@ -234,4 +250,5 @@ journalctl -u sippush -n 20
 - **通道技术白名单**过滤了 `Local/`、`SIP/` 等非监控通道，不会误推外线/中继呼叫
 - **响铃组成员没有技术信息**，推送前会对每个配置的技术各查一次（如 PJSIP+IAX2 就是每成员两次查询）；成员在两种技术下都不存在时跳过推送
 - **响铃组含 Follow-Me（FMFM）成员**时存在极小误推可能：成员本体制已离线但 FMFM 转接手机接听了，该成员仍会收到"未接来电"推送（判活只看本机注册状态）
+- **分机绑定是收窄而非兜底**：某分机若未绑定任何渠道，其离线来电不会产生任何推送（日志仅有"未绑定分机，跳过"）。排查"没收到推送"时优先确认绑定，再看在线判定
 - 扩展新的通道技术（如 chan_sip 的 `SIPpeers`）只需：`internal/ami` 加一个查询实现 + `presence.go` 加一个 case + `config.go` 白名单放行
