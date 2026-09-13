@@ -1,0 +1,27 @@
+# 编译产物
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go 工作目录
+/vendor/
+
+# 真实运行配置（含 AMI secret、Bark device_key），仅提交 config.example.yaml
+/configs/config.yaml
+*.local.yaml
+
+# 运行时文件
+*.log
+*.pid
+
+# 编辑器/系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

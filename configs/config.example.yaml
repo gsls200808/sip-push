@@ -1,0 +1,53 @@
+# sip-push 配置示例
+# 复制为 config.yaml 后修改：cp config.example.yaml config.yaml
+
+ami:
+  # Asterisk AMI 地址（FreePBX 默认 5038）
+  addr: "192.168.11.21:5038"
+  username: "sippush"
+  secret: "CHANGE_ME"
+  reconnect_interval: "5s"   # 断线重连间隔
+  ping_interval: "30s"       # AMI 心跳间隔
+  dial_timeout: "5s"         # TCP 连接超时
+  action_timeout: "5s"       # 单个 AMI 动作响应超时
+
+call:
+  # 要监控的通道技术（对应 DialBegin 的 DestChannel 前缀），可选 PJSIP、IAX2。
+  # PJSIP 分机走 PJSIPShowAors 判活；IAX2 分机（chan_iax2）走 IAXpeerlist 判活。
+  # 不配则默认只有 PJSIP。
+  technologies:
+    - "PJSIP"
+    # - "IAX2"
+  # 目标号码匹配该正则才认为是分机（过滤外线、中继号）
+  ext_pattern: "^[0-9*#]{2,8}$"
+  # 同一通呼叫（LinkedID + 分机）的去重窗口
+  dedup_window: "5m"
+  # 旧版字段，仅在未配置 technologies 时兜底，可留空或删除：
+  # dest_prefix: "PJSIP/"
+
+bark:
+  # 官方实例；自建 Bark 改成你的地址即可
+  base_url: "https://api.day.app"
+  # Bark App 里复制的 device key
+  device_key: "YOUR_DEVICE_KEY"
+  group: "sip-push"
+  push_timeout: "8s"
+
+# ---------------------------------------------------------------------------
+# Asterisk 侧准备：在 /etc/asterisk/manager_custom.conf（FreePBX）增加账号：
+#
+#   [sippush]
+#   secret=CHANGE_ME
+#   deny=0.0.0.0/0.0.0.0
+#   permit=127.0.0.1/255.255.255.255
+#   permit=192.168.11.0/255.255.255.0
+#   read=call,dialplan
+#   write=system,reporting
+#   writetimeout=1000
+#
+# 之后执行：asterisk -rx "manager reload"
+# read=call 用于接收 DialBegin/Hangup；read=dialplan 用于接收 VarSet
+# （FreePBX 对离线分机不产生 DialBegin，需要 VarSet THISDIAL/DIALSTATUS 兜底）；
+# write=system,reporting 用于执行 PJSIPShowAors 与 IAXpeerlist
+# （IAX2 还需 Asterisk 已加载 chan_iax2）。
+# ---------------------------------------------------------------------------
