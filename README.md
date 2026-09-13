@@ -43,16 +43,41 @@ IAX2 判定语义说明：
 ### 3. 去重与推送
 
 - 去重键：`LinkedID + 技术/分机`，同一通呼叫在 `dedup_window`（默认 5 分钟）内只推一次
-- 推送内容：标题 `分机 210 有未接来电`，正文 `200 呼叫分机 210，但该分机当前未注册`
-- Bark 网络错误/5xx 自动重试一次，4xx 等确定性错误不重试
+- 多渠道扇出：Bark 与 yakphone 可同时启用，同一来电所有已配置渠道各推一次；单个渠道失败不影响其他渠道
+- Bark 网络错误/5xx 自动重试一次，4xx 等确定性错误不重试；yakphone 同策略
+
+### 4. 推送渠道
+
+| 渠道 | 形式 | 配置启用条件 |
+|---|---|---|
+| Bark | 通知条（标题 + 正文） | `bark.device_key` 非空 |
+| yakphone | VoIP 来电唤醒（唤醒 App 弹出来电界面） | `yakphone.token` 非空 |
+
+Bark 推送内容：标题 `分机 210 有未接来电`，正文 `200 呼叫分机 210，但该分机当前未注册`。
+
+yakphone 推送载荷（`POST {base_url}/v1/notify`）：
+
+```json
+{
+  "token": "<yakphone.token>",
+  "caller_uri": "sip:<主叫号码>@<yakphone.domain>",
+  "caller_name": "<主叫显示名>",
+  "type": "voip"
+}
+```
+
+- `caller_uri`：主叫号码取 AMI 帧的 `CallerIDNum`，缺失时用 `anonymous`（与 SIP 匿名呼叫惯例一致）；`domain` 来自 `yakphone.domain` 配置（PBX 的 SIP 域名或 IP）
+- `caller_name`：优先 AMI 帧的 `CallerIDName`，回退主叫号码，最终兜底"未知号码"
 
 ## 目录结构
 
 ```
 cmd/sippush/        程序入口与装配
 internal/ami/       AMI 客户端：帧解析、断线重连、动作收发、PJSIP/IAX2 判活
-internal/monitor/   核心编排：DialBegin/VarSet 信号 → 判活 → 推送（含去重）
-internal/bark/      Bark 推送客户端（POST {base_url}/push，JSON 载荷）
+internal/monitor/   核心编排：DialBegin/VarSet 信号 → 判活 → 多渠道扇出（含去重）
+internal/notify/    推送渠道公共接口与消息结构
+internal/bark/      Bark 推送渠道（POST {base_url}/push，JSON 载荷）
+internal/yakphone/  yakphone VoIP 来电唤醒渠道（POST {base_url}/v1/notify）
 internal/config/    YAML 配置加载、默认值与校验
 configs/            config.example.yaml 配置示例
 ```
@@ -96,13 +121,24 @@ go vet ./... && go test ./...
 | `dedup_window` | 5m | 同一通呼叫（LinkedID + 分机）的推送去重窗口 |
 | `dest_prefix` | — | 旧版单技术字段，仅在未配置 `technologies` 时兜底，可删除 |
 
-### bark —— 推送
+### 推送渠道（bark / yakphone 至少配置一个，可同时启用）
+
+#### bark —— 通知条推送（可选）
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `base_url` | `https://api.day.app` | 官方实例；自建 Bark 改成你的地址 |
-| `device_key` | 必填 | Bark App 首页复制的 URL 末尾那串 key |
+| `device_key` | 空（禁用该渠道） | Bark App 首页复制的 URL 末尾那串 key |
 | `group` | `sip-push` | App 内通知分组名 |
+| `push_timeout` | 8s | 单次推送超时 |
+
+#### yakphone —— VoIP 来电唤醒推送（可选）
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `base_url` | `https://push.yakteam.com` | yakphone 推送服务地址 |
+| `token` | 空（禁用该渠道） | yakphone 分配的设备令牌 |
+| `domain` | 必填（启用时） | 构造 `caller_uri` 的 SIP 域（PBX 的 SIP 域名或 IP） |
 | `push_timeout` | 8s | 单次推送超时 |
 
 ## Asterisk / FreePBX 侧准备

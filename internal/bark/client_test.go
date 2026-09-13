@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"sip-push/internal/notify"
 )
 
 type nopLogger struct{}
@@ -42,7 +44,7 @@ func TestPushSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := newTestClient(srv.URL).Push(context.Background(), "标题", "内容"); err != nil {
+	if err := newTestClient(srv.URL).Push(context.Background(), notify.Info{Title: "标题", Body: "内容"}); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	if got.DeviceKey != "devkey123" || got.Title != "标题" || got.Body != "内容" || got.Group != "sip-push" {
@@ -67,7 +69,7 @@ func TestPushRetryOn5xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := newTestClient(srv.URL).Push(context.Background(), "t", "b"); err != nil {
+	if err := newTestClient(srv.URL).Push(context.Background(), notify.Info{Title: "t", Body: "b"}); err != nil {
 		t.Fatalf("5xx 后重试应成功: %v", err)
 	}
 	if n != 2 {
@@ -87,7 +89,7 @@ func TestPushNoRetryOn4xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := newTestClient(srv.URL).Push(context.Background(), "t", "b"); err == nil {
+	if err := newTestClient(srv.URL).Push(context.Background(), notify.Info{Title: "t", Body: "b"}); err == nil {
 		t.Fatal("400 应返回错误")
 	}
 	if n != 1 {

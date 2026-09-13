@@ -1,6 +1,6 @@
 // Package monitor 是核心业务编排：监听 AMI 事件 → 取目标分机 →
 // 按通道技术（PJSIP: PJSIPShowAors / IAX2: IAXpeerlist）判断是否已注册 →
-// 未注册时通过 Bark 推送未接来电提醒。
+// 未注册时向全部已配置渠道（Bark 通知条 / yakphone VoIP 唤醒）推送未接来电提醒。
 //
 // 支持三类呼叫信号，互为补充：
 //
@@ -44,16 +44,12 @@ import (
 	"time"
 
 	"sip-push/internal/ami"
+	"sip-push/internal/notify"
 )
 
 // PresenceQuerier 按通道技术查询分机在线状态（*ami.Client 实现）
 type PresenceQuerier interface {
 	CheckOnline(ctx context.Context, tech, ext string) (*ami.PresenceStatus, error)
-}
-
-// Pusher 推送能力（*bark.Client 实现）
-type Pusher interface {
-	Push(ctx context.Context, title, body string) error
 }
 
 // Config 监控配置
@@ -69,25 +65,42 @@ type Logger interface {
 	Printf(format string, v ...interface{})
 }
 
+// callerInfo 主叫信息（从 AMI 帧提取一次，随候选/推送传递）
+type callerInfo struct {
+	num     string // 号码原始值
+	name    string // 显示名原始值
+	display string // 规整后的展示文案（"未知号码" 兜底）
+}
+
+// frameCaller 从 AMI 帧提取主叫信息
+func frameCaller(f ami.Frame) callerInfo {
+	num := strings.TrimSpace(f.Get("CallerIDNum"))
+	return callerInfo{
+		num:     num,
+		name:    strings.TrimSpace(f.Get("CallerIDName")),
+		display: normalizeCaller(num),
+	}
+}
+
 // dialCandidate 是一通呼叫中出现过的待拨目标。
 // tech 为空表示来自响铃组成员列表（macro-dial），推送前需按技术逐一判活；
 // tech 非空表示来自 THISDIAL（直呼路径），技术已明确。
 type dialCandidate struct {
-	tech   string
-	ext    string
-	caller string
-	at     time.Time
+	tech string
+	ext  string
+	who  callerInfo
+	at   time.Time
 }
 
 // Monitor 来电未注册推送监控器
 type Monitor struct {
-	ami    PresenceQuerier
-	push   Pusher
-	cfg    Config
-	techs  []string // 归一化后的技术名（大写）
-	extRe  *regexp.Regexp
-	logger Logger
-	now    func() time.Time
+	ami     PresenceQuerier
+	pushers []notify.Pusher // 全部已配置推送渠道，逐个扇出
+	cfg     Config
+	techs   []string // 归一化后的技术名（大写）
+	extRe   *regexp.Regexp
+	logger  Logger
+	now     func() time.Time
 
 	mu      sync.Mutex
 	recent  map[string]time.Time       // 去重键 -> 首次命中时间
@@ -96,7 +109,7 @@ type Monitor struct {
 }
 
 // New 创建监控器。AMI 查询器可稍后通过 BindAMI 注入（方便 main 装配）。
-func New(q PresenceQuerier, p Pusher, cfg Config, logger Logger) (*Monitor, error) {
+func New(q PresenceQuerier, pushers []notify.Pusher, cfg Config, logger Logger) (*Monitor, error) {
 	re, err := regexp.Compile(cfg.ExtPattern)
 	if err != nil {
 		return nil, fmt.Errorf("分机号正则非法: %w", err)
@@ -113,7 +126,7 @@ func New(q PresenceQuerier, p Pusher, cfg Config, logger Logger) (*Monitor, erro
 	}
 	return &Monitor{
 		ami:     q,
-		push:    p,
+		pushers: pushers,
 		cfg:     cfg,
 		techs:   techs,
 		extRe:   re,
@@ -167,7 +180,7 @@ func (m *Monitor) onDialBegin(f ami.Frame) {
 	}
 	linked := linkedID(f)
 	m.rememberLeg(linked, ext) // 响铃组路径：该成员的通道已建起，不是离线成员
-	m.fire(linked, tech, ext, normalizeCaller(f.Get("CallerIDNum")), "DialBegin")
+	m.fire(linked, tech, ext, frameCaller(f), "DialBegin")
 }
 
 // onVarSet 处理 FreePBX 离线信号链：
@@ -187,8 +200,7 @@ func (m *Monitor) onVarSet(f ami.Frame) {
 		if ext == "" || !m.extRe.MatchString(ext) {
 			return
 		}
-		caller := normalizeCaller(f.Get("CallerIDNum"))
-		m.rememberPending(linked, dialCandidate{tech: tech, ext: ext, caller: caller, at: m.now()})
+		m.rememberPending(linked, dialCandidate{tech: tech, ext: ext, who: frameCaller(f), at: m.now()})
 	case "DIALSTATUS":
 		// FreePBX 对同一通呼叫会多次置该值，由 fire 的去重窗口保证只推一次。
 		if f.Get("Context") == "macro-dial" {
@@ -207,7 +219,7 @@ func (m *Monitor) onVarSet(f ami.Frame) {
 			if c.tech == "" { // 响铃组候选由 evaluateGroup 处理
 				continue
 			}
-			m.fire(linked, c.tech, c.ext, c.caller, "CHANUNAVAIL")
+			m.fire(linked, c.tech, c.ext, c.who, "CHANUNAVAIL")
 		}
 	}
 }
@@ -230,7 +242,7 @@ func (m *Monitor) onNewExten(f ami.Frame) {
 			if !m.extRe.MatchString(ext) {
 				continue
 			}
-			m.rememberPending(linked, dialCandidate{ext: ext, caller: normalizeCaller(f.Get("CallerIDNum")), at: m.now()})
+			m.rememberPending(linked, dialCandidate{ext: ext, who: frameCaller(f), at: m.now()})
 		}
 		return
 	}
@@ -346,16 +358,16 @@ func (m *Monitor) evaluateGroup(linked, signal string) {
 // fireCandidates 触发单个候选的判活推送：技术未知时按配置逐一判活
 func (m *Monitor) fireCandidates(linked string, c dialCandidate, signal string) {
 	if c.tech != "" {
-		m.fire(linked, c.tech, c.ext, c.caller, signal)
+		m.fire(linked, c.tech, c.ext, c.who, signal)
 		return
 	}
 	for _, t := range m.techs {
-		m.fire(linked, t, c.ext, c.caller, signal)
+		m.fire(linked, t, c.ext, c.who, signal)
 	}
 }
 
 // fire 去重命中后异步判活并推送；signal 仅用于日志区分来源
-func (m *Monitor) fire(linked, tech, ext, caller, signal string) {
+func (m *Monitor) fire(linked, tech, ext string, ci callerInfo, signal string) {
 	if linked == "" {
 		return
 	}
@@ -364,8 +376,8 @@ func (m *Monitor) fire(linked, tech, ext, caller, signal string) {
 		m.logger.Printf("同一通呼叫已推送过，忽略: %s/%s linked=%s", tech, ext, linked)
 		return
 	}
-	m.logger.Printf("捕获离线呼叫信号(%s): %s/%s caller=%s linked=%s", signal, tech, ext, caller, linked)
-	go m.checkAndPush(tech, ext, caller)
+	m.logger.Printf("捕获离线呼叫信号(%s): %s/%s caller=%s linked=%s", signal, tech, ext, ci.display, linked)
+	go m.checkAndPush(tech, ext, ci)
 }
 
 // linkedID 取整通呼叫标识；个别版本没有 LinkedID 时回退 UniqueID
@@ -454,8 +466,8 @@ func (m *Monitor) removePending(linked string) {
 	delete(m.pending, linked)
 }
 
-// checkAndPush 查询在线状态并在离线时推送
-func (m *Monitor) checkAndPush(tech, ext, caller string) {
+// checkAndPush 查询在线状态并在离线时向全部渠道扇出推送
+func (m *Monitor) checkAndPush(tech, ext string, ci callerInfo) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -473,13 +485,22 @@ func (m *Monitor) checkAndPush(tech, ext, caller string) {
 		return
 	}
 
-	title := fmt.Sprintf("分机 %s 有未接来电", ext)
-	body := fmt.Sprintf("%s 呼叫分机 %s，但该分机当前未注册", caller, ext)
-	if err := m.push.Push(ctx, title, body); err != nil {
-		m.logger.Printf("推送失败 %s/%s caller=%s: %v", tech, ext, caller, err)
-		return
+	info := notify.Info{
+		Tech:       tech,
+		Ext:        ext,
+		CallerNum:  ci.num,
+		CallerName: ci.name,
+		Caller:     ci.display,
+		Title:      fmt.Sprintf("分机 %s 有未接来电", ext),
+		Body:       fmt.Sprintf("%s 呼叫分机 %s，但该分机当前未注册", ci.display, ext),
 	}
-	m.logger.Printf("已推送离线来电提醒: %s/%s caller=%s", tech, ext, caller)
+	for _, p := range m.pushers {
+		if err := p.Push(ctx, info); err != nil {
+			m.logger.Printf("推送失败[%s] %s/%s caller=%s: %v", p.Name(), tech, ext, ci.display, err)
+			continue
+		}
+		m.logger.Printf("已推送离线来电提醒[%s]: %s/%s caller=%s", p.Name(), tech, ext, ci.display)
+	}
 }
 
 // markRecent 去重：窗口内已存在的键返回 false；顺带清理过期条目。

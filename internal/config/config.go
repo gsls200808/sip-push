@@ -30,9 +30,10 @@ func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 // Config 全部配置
 type Config struct {
-	AMI  AMIConfig  `yaml:"ami"`
-	Call CallConfig `yaml:"call"`
-	Bark BarkConfig `yaml:"bark"`
+	AMI      AMIConfig      `yaml:"ami"`
+	Call     CallConfig     `yaml:"call"`
+	Bark     BarkConfig     `yaml:"bark"`
+	Yakphone YakphoneConfig `yaml:"yakphone"`
 }
 
 // AMIConfig Asterisk Manager Interface 连接配置
@@ -60,12 +61,26 @@ type CallConfig struct {
 	DedupWindow Duration `yaml:"dedup_window"`
 }
 
-// BarkConfig Bark 推送配置
+// BarkConfig Bark 推送配置（可选渠道：device_key 为空时禁用）
 type BarkConfig struct {
 	BaseURL   string `yaml:"base_url"`
 	DeviceKey string `yaml:"device_key"`
 	// Group Bark 通知分组名，便于在 App 里归类
 	Group string `yaml:"group"`
+	// PushTimeout 单次推送超时
+	PushTimeout Duration `yaml:"push_timeout"`
+}
+
+// YakphoneConfig yakphone 软电话 VoIP 来电推送配置
+// （可选渠道：token 为空时禁用；与 bark 至少启用一个）。
+// 文档：POST {base_url}/v1/notify
+// {"token":"...","caller_uri":"sip:1000@pbx.example.com","caller_name":"Alice","type":"voip"}
+type YakphoneConfig struct {
+	BaseURL string `yaml:"base_url"`
+	Token   string `yaml:"token"`
+	// Domain 构造 caller_uri 的 SIP 域（PBX 的 SIP 域名或 IP），
+	// yakphone App 以此匹配来电归属
+	Domain string `yaml:"domain"`
 	// PushTimeout 单次推送超时
 	PushTimeout Duration `yaml:"push_timeout"`
 }
@@ -128,6 +143,12 @@ func (c *Config) applyDefaults() {
 	if c.Bark.PushTimeout == 0 {
 		c.Bark.PushTimeout = Duration(8 * time.Second)
 	}
+	if c.Yakphone.BaseURL == "" {
+		c.Yakphone.BaseURL = "https://push.yakteam.com"
+	}
+	if c.Yakphone.PushTimeout == 0 {
+		c.Yakphone.PushTimeout = Duration(8 * time.Second)
+	}
 }
 
 // Validate 检查必填项与格式
@@ -151,8 +172,11 @@ func (c *Config) Validate() error {
 	if _, err := regexp.Compile(c.Call.ExtPattern); err != nil {
 		return fmt.Errorf("call.ext_pattern 不是合法正则: %w", err)
 	}
-	if c.Bark.DeviceKey == "" {
-		return fmt.Errorf("bark.device_key 不能为空")
+	if c.Bark.DeviceKey == "" && c.Yakphone.Token == "" {
+		return fmt.Errorf("至少配置一个推送渠道：bark.device_key 或 yakphone.token")
+	}
+	if c.Yakphone.Token != "" && c.Yakphone.Domain == "" {
+		return fmt.Errorf("yakphone.domain 不能为空（用于构造 caller_uri 的 SIP 域）")
 	}
 	return nil
 }

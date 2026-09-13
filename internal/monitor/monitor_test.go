@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"sip-push/internal/ami"
+	"sip-push/internal/notify"
 )
 
 type queryCall struct {
@@ -49,22 +50,30 @@ func (f *fakeQuerier) queryCount() int {
 }
 
 type fakePusher struct {
+	name   string
 	mu     sync.Mutex
 	pushes []pushMsg
 	got    chan pushMsg
 	err    error
 }
 
-type pushMsg struct{ title, body string }
+type pushMsg struct{ info notify.Info }
 
-func (p *fakePusher) Push(ctx context.Context, title, body string) error {
+func (p *fakePusher) Name() string {
+	if p.name == "" {
+		return "fake"
+	}
+	return p.name
+}
+
+func (p *fakePusher) Push(ctx context.Context, info notify.Info) error {
 	p.mu.Lock()
-	p.pushes = append(p.pushes, pushMsg{title, body})
+	p.pushes = append(p.pushes, pushMsg{info})
 	p.mu.Unlock()
 	if p.err != nil {
 		return p.err
 	}
-	p.got <- pushMsg{title, body}
+	p.got <- pushMsg{info}
 	return nil
 }
 
@@ -76,8 +85,17 @@ func (p *fakePusher) snapshot() []pushMsg {
 	return out
 }
 
-func newTestMonitor(q PresenceQuerier, p Pusher) *Monitor {
-	m, err := New(q, p, Config{
+func newTestMonitor(q PresenceQuerier, p *fakePusher) *Monitor {
+	return newTestMonitorMulti(q, p)
+}
+
+// newTestMonitorMulti 用多个渠道创建监控器
+func newTestMonitorMulti(q PresenceQuerier, ps ...*fakePusher) *Monitor {
+	pushers := make([]notify.Pusher, len(ps))
+	for i, p := range ps {
+		pushers[i] = p
+	}
+	m, err := New(q, pushers, Config{
 		Technologies: []string{"PJSIP", "IAX2"},
 		ExtPattern:   `^[0-9*#]{2,8}$`,
 		DedupWindow:  time.Minute,
@@ -159,14 +177,39 @@ func waitQuery(t *testing.T, ch <-chan queryCall) queryCall {
 	}
 }
 
-func waitPush(t *testing.T, ch chan pushMsg) pushMsg {
+func waitPush(t *testing.T, ch chan pushMsg) notify.Info {
 	t.Helper()
 	select {
 	case m := <-ch:
-		return m
+		return m.info
 	case <-time.After(2 * time.Second):
 		t.Fatal("等待推送超时")
-		return pushMsg{}
+		return notify.Info{}
+	}
+}
+
+func TestMultiChannelFanOut(t *testing.T) {
+	q := &fakeQuerier{
+		statuses: map[string]*ami.PresenceStatus{"PJSIP/210": {Found: true, Online: false}},
+		queried:  make(chan queryCall, 8),
+	}
+	bark := &fakePusher{name: "bark", got: make(chan pushMsg, 8)}
+	yak := &fakePusher{name: "yakphone", got: make(chan pushMsg, 8)}
+	fail := &fakePusher{name: "bad", got: make(chan pushMsg, 8), err: context.DeadlineExceeded}
+	m := newTestMonitorMulti(q, bark, yak, fail)
+
+	m.OnEvent("DialBegin", dialBegin("PJSIP/210", "13800001111", "L1"))
+
+	// 每个渠道各收到一次推送；单个渠道失败不影响其他渠道
+	_ = waitPush(t, bark.got)
+	_ = waitPush(t, yak.got)
+	time.Sleep(100 * time.Millisecond)
+	if n := len(bark.snapshot()); n != 1 || len(yak.snapshot()) != 1 {
+		t.Fatalf("两渠道应各推送一次: bark=%d yak=%d", n, len(yak.snapshot()))
+	}
+	if info := bark.snapshot()[0].info; info.Ext != "210" || info.CallerNum != "13800001111" ||
+		info.Title == "" || info.Body == "" {
+		t.Fatalf("通知信息异常: %+v", info)
 	}
 }
 
@@ -181,8 +224,8 @@ func TestOfflineExtensionTriggersPush(t *testing.T) {
 	m.OnEvent("DialBegin", dialBegin("PJSIP/210", "13800001111", "L1"))
 
 	msg := waitPush(t, p.got)
-	if !strings.Contains(msg.title, "210") || !strings.Contains(msg.body, "13800001111") ||
-		!strings.Contains(msg.body, "未注册") {
+	if !strings.Contains(msg.Title, "210") || !strings.Contains(msg.Body, "13800001111") ||
+		!strings.Contains(msg.Body, "未注册") {
 		t.Fatalf("推送内容异常: %+v", msg)
 	}
 }
@@ -291,7 +334,7 @@ func TestUnknownCallerShown(t *testing.T) {
 	delete(f, "CallerIDNum")
 	m.OnEvent("DialBegin", f)
 	msg := waitPush(t, p.got)
-	if !strings.Contains(msg.body, "未知号码") {
+	if !strings.Contains(msg.Body, "未知号码") {
 		t.Fatalf("未知主叫文案异常: %+v", msg)
 	}
 }
@@ -312,7 +355,7 @@ func TestIAX2OfflinePeerTriggersPush(t *testing.T) {
 		t.Fatalf("IAX2 查询参数异常: %+v", c)
 	}
 	msg := waitPush(t, p.got)
-	if !strings.Contains(msg.title, "3001") {
+	if !strings.Contains(msg.Title, "3001") {
 		t.Fatalf("推送内容异常: %+v", msg)
 	}
 }
@@ -380,7 +423,7 @@ func TestVarSetChanUnavailPJSIPTriggersPush(t *testing.T) {
 	}
 
 	msg := waitPush(t, p.got)
-	if !strings.Contains(msg.title, "210") || !strings.Contains(msg.body, "200") {
+	if !strings.Contains(msg.Title, "210") || !strings.Contains(msg.Body, "200") {
 		t.Fatalf("推送内容异常: %+v", msg)
 	}
 	// 两次 CHANUNAVAIL 只应查询/推送一次
@@ -406,7 +449,7 @@ func TestVarSetChanUnavailIAX2TriggersPush(t *testing.T) {
 	}
 
 	msg := waitPush(t, p.got)
-	if !strings.Contains(msg.title, "220") || !strings.Contains(msg.body, "200") {
+	if !strings.Contains(msg.Title, "220") || !strings.Contains(msg.Body, "200") {
 		t.Fatalf("IAX2 推送内容异常: %+v", msg)
 	}
 }
@@ -490,7 +533,7 @@ func TestRingGroupOfflinePJSIPImmediatePush(t *testing.T) {
 	pushed := map[string]bool{}
 	for i := 0; i < 4; i++ {
 		msg := waitPush(t, p.got)
-		pushed[msg.title] = true
+		pushed[msg.Title] = true
 	}
 	for _, ext := range []string{"201", "202", "203", "210"} {
 		if !pushed["分机 "+ext+" 有未接来电"] {
@@ -505,7 +548,7 @@ func TestRingGroupOfflinePJSIPImmediatePush(t *testing.T) {
 	// ds 中但通道建不起来的 IAX2 成员，由 DIALSTATUS 补推
 	m.OnEvent("VarSet", varSetCtx("DIALSTATUS", "CHANUNAVAIL", "macro-dial", "138", "L20"))
 	msg := waitPush(t, p.got)
-	if !strings.Contains(msg.title, "220") {
+	if !strings.Contains(msg.Title, "220") {
 		t.Fatalf("IAX2 成员应补推: %+v", msg)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -559,7 +602,7 @@ func TestRingGroupDialConfirmMembers(t *testing.T) {
 	got := map[string]bool{}
 	for i := 0; i < 2; i++ {
 		msg := waitPush(t, p.got)
-		got[msg.title] = true
+		got[msg.Title] = true
 	}
 	for _, ext := range []string{"201", "210"} {
 		if !got["分机 "+ext+" 有未接来电"] {
@@ -580,7 +623,7 @@ func TestRingGroupEmptyDialstringHangupFallback(t *testing.T) {
 	m.OnEvent("Newexten", newexten("dial,20,HhTtrQ(NO_ANSWER),210", "from-internal", "138", "L23"))
 	m.OnEvent("Hangup", ami.Frame{"Event": "Hangup", "UniqueID": "x", "LinkedID": "L23"})
 	msg := waitPush(t, p.got)
-	if !strings.Contains(msg.title, "210") {
+	if !strings.Contains(msg.Title, "210") {
 		t.Fatalf("兜底推送异常: %+v", msg)
 	}
 }

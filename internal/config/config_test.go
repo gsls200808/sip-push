@@ -69,6 +69,43 @@ func TestLoadRejectsMissingFields(t *testing.T) {
 	}
 }
 
+func TestLoadYakphoneChannel(t *testing.T) {
+	dir := t.TempDir()
+
+	// 仅配置 yakphone（bark 留空禁用）
+	p := filepath.Join(dir, "yak.yaml")
+	content := "ami:\n  addr: \"1.2.3.4:5038\"\n  username: u\n  secret: s\n" +
+		"yakphone:\n  token: tok\n  domain: pbx.example.com\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("仅 yakphone 应可加载: %v", err)
+	}
+	if c.Yakphone.BaseURL != "https://push.yakteam.com" || c.Yakphone.PushTimeout.Std() != 8*time.Second {
+		t.Fatalf("yakphone 默认值异常: %+v", c.Yakphone)
+	}
+
+	// 配了 token 但缺 domain 应报错
+	bad := filepath.Join(dir, "nodomain.yaml")
+	if err := os.WriteFile(bad, []byte("ami:\n  addr: x\n  username: u\n  secret: s\nyakphone:\n  token: tok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(bad); err == nil {
+		t.Fatal("yakphone.token 缺 domain 应报错")
+	}
+
+	// bark 与 yakphone 同时配置
+	both := filepath.Join(dir, "both.yaml")
+	if err := os.WriteFile(both, []byte("ami:\n  addr: x\n  username: u\n  secret: s\nbark:\n  device_key: k\nyakphone:\n  token: tok\n  domain: d\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(both); err != nil {
+		t.Fatalf("双渠道应可加载: %v", err)
+	}
+}
+
 func TestLoadTechnologies(t *testing.T) {
 	dir := t.TempDir()
 	base := "ami:\n  addr: \"1.2.3.4:5038\"\n  username: u\n  secret: s\nbark:\n  device_key: k\n"

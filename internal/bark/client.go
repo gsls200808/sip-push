@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"sip-push/internal/notify"
 )
 
 // Config Bark 配置
@@ -42,6 +44,9 @@ func New(cfg Config, logger Logger) *Client {
 	}
 }
 
+// Name 实现 notify.Pusher
+func (c *Client) Name() string { return "bark" }
+
 type payload struct {
 	DeviceKey string `json:"device_key"`
 	Title     string `json:"title"`
@@ -54,9 +59,10 @@ type result struct {
 	Msg  string `json:"message"`
 }
 
-// Push 发送一条通知；网络错误 / 5xx 会重试一次，4xx 等确定性错误不重试。
-func (c *Client) Push(ctx context.Context, title, body string) error {
-	p := payload{DeviceKey: c.cfg.DeviceKey, Title: title, Body: body, Group: c.cfg.Group}
+// Push 实现 notify.Pusher：发送一条通知；网络错误 / 5xx 会重试一次，
+// 4xx 等确定性错误不重试。
+func (c *Client) Push(ctx context.Context, info notify.Info) error {
+	p := payload{DeviceKey: c.cfg.DeviceKey, Title: info.Title, Body: info.Body, Group: c.cfg.Group}
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return err

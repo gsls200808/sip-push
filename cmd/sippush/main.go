@@ -1,5 +1,5 @@
 // sip-push：基于 RFC 8599 思路的未注册分机来电推送服务
-// （AMI + DialBegin + PJSIPShowAors/IAXpeerlist + Bark，支持 PJSIP/IAX2 分机）
+// （AMI + DialBegin + PJSIPShowAors/IAXpeerlist + 多渠道推送，支持 PJSIP/IAX2 分机）
 package main
 
 import (
@@ -14,6 +14,8 @@ import (
 	"sip-push/internal/bark"
 	"sip-push/internal/config"
 	"sip-push/internal/monitor"
+	"sip-push/internal/notify"
+	"sip-push/internal/yakphone"
 )
 
 func main() {
@@ -27,15 +29,30 @@ func main() {
 		logger.Fatalf("加载配置失败: %v", err)
 	}
 
-	barkClient := bark.New(bark.Config{
-		BaseURL:     cfg.Bark.BaseURL,
-		DeviceKey:   cfg.Bark.DeviceKey,
-		Group:       cfg.Bark.Group,
-		PushTimeout: cfg.Bark.PushTimeout.Std(),
-	}, logger)
+	// 装配全部已配置的推送渠道（bark / yakphone，可同时启用）
+	var pushers []notify.Pusher
+	if cfg.Bark.DeviceKey != "" {
+		pushers = append(pushers, bark.New(bark.Config{
+			BaseURL:     cfg.Bark.BaseURL,
+			DeviceKey:   cfg.Bark.DeviceKey,
+			Group:       cfg.Bark.Group,
+			PushTimeout: cfg.Bark.PushTimeout.Std(),
+		}, logger))
+	}
+	if cfg.Yakphone.Token != "" {
+		pushers = append(pushers, yakphone.New(yakphone.Config{
+			BaseURL:     cfg.Yakphone.BaseURL,
+			Token:       cfg.Yakphone.Token,
+			Domain:      cfg.Yakphone.Domain,
+			PushTimeout: cfg.Yakphone.PushTimeout.Std(),
+		}, logger))
+	}
+	for _, p := range pushers {
+		logger.Printf("推送渠道已启用: %s", p.Name())
+	}
 
 	// monitor 需要在创建 ami.Client 时就作为事件回调，先建 monitor 再建 client
-	mon, err := monitor.New(nil, barkClient, monitor.Config{
+	mon, err := monitor.New(nil, pushers, monitor.Config{
 		Technologies: cfg.Call.Technologies,
 		ExtPattern:   cfg.Call.ExtPattern,
 		DedupWindow:  cfg.Call.DedupWindow.Std(),
